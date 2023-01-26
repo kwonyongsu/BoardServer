@@ -1,0 +1,580 @@
+//#pragma warning(disable:4996)
+#include "ConnectionManager.h"
+#include "Connection.h"
+#include "CPacketManager.h"
+#include "CPlayerManager.h"
+#include "CRoomManager.h"
+#include "Chatting.h"
+#include "Common.h"
+#define EXTRA_SIZE 50
+
+Connection::Connection() :m_index(0), m_isConnect(0), m_recvedSize(0), m_socket(0)
+{
+	m_recvBuffer = new char[MAX_SIZE_RINGBUFFER+ EXTRA_SIZE];
+	m_ringBuffer = new CRingBuffer(m_recvBuffer);
+
+	m_writePoint = m_recvBuffer;
+	m_readPoint = m_recvBuffer;
+	m_recvBegin = m_recvBuffer;
+	m_recvEnd = m_recvBuffer + MAX_SIZE_RINGBUFFER;
+	m_sendBuffer = new char[MAX_SIZE_STRING];
+	m_strName = new char[MAX_SIZE_STRING];
+}
+Connection::~Connection()
+{
+	delete[]m_recvBuffer;
+	delete[]m_sendBuffer;
+	closesocket(m_socket);
+}
+
+int Connection::RecvSocket()
+{
+	int recvSize = 0;
+	unsigned short packetSize = 0;
+	int size = m_ringBuffer->GetRemainSize();
+	int drSize = m_ringBuffer->DirectRemainSize();
+	char* wp = m_ringBuffer->GetWritePoint();
+
+	recvSize = recv(m_socket, wp, size, 0);
+
+	if (recvSize < 0)
+	{
+		//closesocket
+		return 0;
+	}
+
+	if (recvSize > drSize)
+	{
+		m_ringBuffer->SetWriteBuffer(recvSize);
+	}
+	else
+	{
+		m_ringBuffer->Write(recvSize);
+	}
+	m_recvedSize += recvSize;
+
+	if (m_recvedSize > 2)
+	{
+		do {
+			char* pRp = m_ringBuffer->GetReadPoint();
+			int size = m_ringBuffer->DirectReadSize();
+			packetSize = *(unsigned short*)pRp;
+			if (m_recvedSize >= packetSize)
+			{
+				if (size >= packetSize)
+				{
+					RecvProc(pRp);//읽기
+					m_ringBuffer->Read(packetSize);
+				}
+				else
+				{
+					char* pBuffer = m_ringBuffer->SetReadPoint(packetSize);
+					RecvProc(pBuffer);
+					delete[] pBuffer;
+				}
+				m_recvedSize -= (packetSize);
+			}
+
+		} while (m_recvedSize >= packetSize);
+	}
+
+	return 1;
+}
+
+void Connection::RecvProc(char* _recvBuffer)
+{
+	char* temp = m_sendBuffer;
+	char* packetBuffer = _recvBuffer;
+	short size = *(short*)packetBuffer;
+	packetBuffer += 2;
+	short type = *(short*)packetBuffer;
+	packetBuffer += 2;
+	
+	switch (type)
+	{
+	case (short)PacketType::LOGIN_REQ:
+	{
+		LoginRequire(packetBuffer);
+	}
+		break;
+
+	case(short)PacketType::WAITINGROOMLIST_REQ:
+	{
+		WaitingRoomRequire();
+	}
+		break;
+
+	case(short)PacketType::CHAT_INPUT:
+	{
+		ChattingInput(packetBuffer);
+	}
+		break;
+	case(short)PacketType::GAMEROOM_REQ:
+	{
+		GameRoomRequire(packetBuffer);
+	}
+	break;
+	case(short)PacketType::GAMEROOMLIST_REQ:
+	{
+		GameRoomListRequire();
+	}
+	break;
+
+	case(short)PacketType::GAMEROOM_ENTER_REQ:
+	{
+		GameRoomEnterReq(packetBuffer);
+	}
+	break;
+
+
+	case(short)PacketType::GAMEROOM_PLAYERLIST_REQ:
+	{
+		GameRoomPlayerListReq();
+	}
+	break;
+	case(short)PacketType::GAME_READY_REQ:
+	{
+		GameReadyReq();
+	}
+	break;
+
+	case(short)PacketType::GAME_PROC_REQ:
+	{
+		GameProcReq(packetBuffer);
+	}
+	break;
+
+	case(short)PacketType::TIME_OVER:
+	{
+		TimeOver(packetBuffer);
+	}
+	break;
+
+	case(short)PacketType::GAMEROOM_EXIT:
+	{
+		GameRoomExit();
+	}
+	break;
+
+	case(short)PacketType::GAME_CHAT_REQ:
+	{
+		GameRoomChatting(packetBuffer);
+	}
+	break;
+
+
+	default:
+		break;
+	}
+	
+}
+
+void Connection::DisConnection()
+{
+	m_index = 0;
+	m_isConnect = false;
+	m_recvedSize = 0;
+	m_socket = 0;
+
+	delete m_recvBuffer;
+	delete m_sendBuffer;
+	delete m_strName;
+	m_recvBuffer = new char[MAX_SIZE_STRING];
+	m_sendBuffer = new char[MAX_SIZE_STRING];
+	m_strName = new char[MAX_SIZE_STRING];
+
+}
+
+int Connection::GetRemainSize()
+{
+	if(m_writePoint>=m_readPoint)return (m_recvEnd - m_writePoint)+(m_readPoint-m_recvBegin);
+	return m_readPoint - m_writePoint;
+}
+
+int Connection::GetUsedSize()
+{
+	if (m_writePoint >= m_readPoint)return (m_writePoint - m_readPoint);
+	return (m_writePoint - m_recvBegin) + (m_recvEnd - m_readPoint);
+}
+
+void Connection::SetWriteBuffer(char* _buffer, int _size)
+{
+	//if(Get)
+
+}
+
+int Connection::DirectRemainSize()
+{
+	if (m_writePoint >= m_readPoint)return m_recvEnd - m_writePoint;
+	return m_readPoint - m_writePoint;
+}
+
+int Connection::DirectReadSize()
+{
+	if (m_writePoint >= m_readPoint)return m_writePoint - m_readPoint;
+	return m_recvEnd - m_readPoint;
+}
+
+
+void Connection::LoginRequire(char* _packetBuffer)
+{
+	short dataSize = *(short*)_packetBuffer;
+	_packetBuffer += 2;
+	char* sendBuffer = m_sendBuffer;
+
+	memcpy(m_strName, _packetBuffer, dataSize);
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->AddPlayer(m_strName, m_index);
+	CRoomManager::Getinstance()->EnterRoom(0, pPlayer);//로비에
+	sendBuffer += 2;  // size 
+	*(u_short*)sendBuffer = (u_short)PacketType::LOGIN_PER;
+	sendBuffer += 2;  // type 
+	// data 
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+}
+
+void Connection::WaitingRoomRequire()
+{
+	int playercount = CPlayerManager::Getinstance()->GetPlayerCount();
+	if (playercount < 0)return;
+	CRoom* pLoby = CRoomManager::Getinstance()->GetLoby();
+	char* sendBuffer = m_sendBuffer;
+	sendBuffer += 2;
+	//size
+	*(u_short*)sendBuffer = (u_short)PacketType::WAITINGROOMLIST_RETURN;
+	sendBuffer += 2;
+	//type
+	*(u_short*)sendBuffer = (u_short)playercount;
+	sendBuffer += 2;
+	for (int i = 0; i < playercount; i++)
+	{
+		CPlayer* pPlayer = pLoby->GetRoomPlayer(i);
+		//CPlayerManager::Getinstance()->g
+		*(u_short*)sendBuffer = pPlayer->GetRoomNum();
+		sendBuffer += 2;
+		memcpy(sendBuffer, pPlayer->GetId(), pPlayer->GetLen());
+		sendBuffer += pPlayer->GetLen();
+	}
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+}
+
+void Connection::ChattingInput(char* _packetBuffer)
+{
+	_packetBuffer += 2;
+
+	char* sendBuffer = m_sendBuffer;
+	char* strTmp = new char[MAX_SIZE_STRING];
+	//char strTmp[MAX_SIZE_STRING] = { 0, };
+	short chattingSize = sprintf(strTmp, "%s : %s", CPlayerManager::Getinstance()->FindPlayer(m_index)->GetId(), _packetBuffer);
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)PacketType::CHAT_REFRESH;
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)Chatting::Getinstance()->GetChattingCount();
+	sendBuffer += 2;
+	memcpy(sendBuffer, strTmp, chattingSize + 1);
+	sendBuffer += chattingSize + 1;
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	int LobbyPlayerCount = CRoomManager::Getinstance()->WaitingRooomPlayerCount();
+	for (int i = 0; i < LobbyPlayerCount; i++)
+	{
+		send(CRoomManager::Getinstance()->LobbyPlayerSocket(i), m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+	}
+	//delete[] strTmp;
+}
+
+
+void Connection::GameRoomRequire(char* _packetBuffer)
+{
+	char* sendBuffer = m_sendBuffer;
+	short dataSize = *(short*)_packetBuffer;
+	_packetBuffer += 2;
+	char* strTmp = new char[MAX_SIZE_ID];
+	memcpy(strTmp, _packetBuffer, dataSize);
+	//방이 없으면 만들고 있던방에 들어가는거면 방의 인원 체크를해야함.
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->CreateRoom();
+	CRoom* pLoby = CRoomManager::Getinstance()->GetRoom(0);
+	pLoby->ExitRoom(pPlayer); //로비에서 나가고 들어간다.
+	pRoom->EnterRoom(pPlayer);
+	pRoom->SetName(strTmp);
+	sendBuffer += 2;  // size 
+	*(u_short*)sendBuffer = (u_short)PacketType::GAMEROOM_PER;
+	sendBuffer += 2;  // type 
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+	//delete[] strTmp;
+}
+
+void Connection::GameRoomListRequire()
+{
+	char* sendBuffer = m_sendBuffer;
+
+	short roomCount = CRoomManager::Getinstance()->GetRoomCount();
+	if (roomCount < 0)return;
+	sendBuffer += 2;
+	//size
+	*(u_short*)sendBuffer = (u_short)PacketType::GAMEROOMLIST_RETURN;
+	sendBuffer += 2;
+	//type
+	*(u_short*)sendBuffer = (u_short)roomCount;
+	sendBuffer += 2;
+	//대기실 제외하고 받아오기
+	for (int i = 1; i < roomCount + 1; i++)
+	{
+		CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(i);
+		CPlayer* pPlayer = pRoom->GetRoomPlayer(0);
+		*(u_short*)sendBuffer = pRoom->GetPlayerCount();
+		sendBuffer += 2;
+		//인원
+		memcpy(sendBuffer, pPlayer->GetId(), pPlayer->GetLen());
+		sendBuffer += pPlayer->GetLen();
+		//방장 이름
+		memcpy(sendBuffer, pRoom->GetRoomName(), pRoom->GetNameLen());
+		sendBuffer += pRoom->GetNameLen();
+		//방이름
+	}
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+}
+
+void Connection::GameRoomPlayerListReq()
+{
+	char* sendBuffer = m_sendBuffer;
+
+	sendBuffer += 2;
+	//사이즈
+	*(u_short*)sendBuffer = (u_short)PacketType::GAMEROOM_PLAYERLIST_RETURN;
+	sendBuffer += 2;
+	//type
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+	short playerCount = pRoom->GetPlayerCount();
+
+	*(u_short*)sendBuffer = (u_short)playerCount;//방에 인원
+	sendBuffer += 2;
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		memcpy(sendBuffer, pNPlayer->GetId(), pNPlayer->GetLen());
+		sendBuffer += pNPlayer->GetLen();
+	}
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+
+	//
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		int index = pNPlayer->GetIndex();
+		Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+		send(connection->m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+	}
+	
+}
+
+void Connection::GameRoomChatting(char* _packetBuffer)
+{
+	char* sendBuffer = m_sendBuffer;
+	_packetBuffer += 2;
+
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+
+	char* strTmp = new char[MAX_SIZE_STRING];
+	short chattingSize = sprintf(strTmp, "%s : %s", pPlayer->GetId(), _packetBuffer);
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)PacketType::GAME_CHAT_RETURN;
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)Chatting::Getinstance()->GetChattingCount();
+	sendBuffer += 2;
+	memcpy(sendBuffer, strTmp, chattingSize + 1);
+	sendBuffer += chattingSize + 1;
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	int playerCount = pRoom->GetPlayerCount();
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		int index = pNPlayer->GetIndex();
+		Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+		send(connection->m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+	}
+	//delete strTmp;
+}
+
+void Connection::GameRoomEnterReq(char* _packetBuffer)
+{
+	char* sendBuffer = m_sendBuffer;
+	short roomNum = *(short*)_packetBuffer;
+	_packetBuffer += 2;
+	roomNum++;//로비때문에 1+
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pLoby = CRoomManager::Getinstance()->GetRoom(0);
+	pLoby->ExitRoom(pPlayer); //로비에서 나가고 들어간다.
+
+	if (CRoomManager::Getinstance()->EnterRoom(roomNum, pPlayer))
+	{
+		sendBuffer += 2;
+		//사이즈
+		*(u_short*)sendBuffer = (u_short)PacketType::GAMEROOM_ENTER_PER;
+		sendBuffer += 2;
+		//타입
+		*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+		send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+		//GAMEROOM_ENTER_PER
+		return;
+	}
+	
+	sendBuffer += 2;
+	//사이즈
+	*(u_short*)sendBuffer = (u_short)PacketType::GAMEROOM_ENTER_ERR;
+	sendBuffer += 2;
+	//type
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+	//GAMEROOM_ENTER_ERR
+	
+}
+
+void Connection::GameReadyReq()
+{
+	char* sendBuffer = m_sendBuffer;
+	//type
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+	pPlayer->Ready();
+	short playerCount = pRoom->GetPlayerCount();
+	sendBuffer += 2;
+	//사이즈
+	if (pRoom->ReadyCheck())
+	{
+		pRoom->SetTurn();
+		*(u_short*)sendBuffer = (u_short)PacketType::GAME_START;
+		sendBuffer += 2;
+		*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+		*(u_short*)sendBuffer = (u_short)playerCount;//방에 인원
+		sendBuffer += 2;
+		if (playerCount < 0)return;
+		for (int i = 0; i < playerCount; i++)
+		{
+			CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+			int index = pNPlayer->GetIndex();
+			Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+			u_short turn = pNPlayer->GetTurn();
+			*(u_short*)sendBuffer = turn;
+			sendBuffer += 2;
+			*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+			send(connection->GetSocket(), m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+			sendBuffer -= 2;
+		}
+		return;
+	}
+	
+	*(u_short*)sendBuffer = (u_short)PacketType::GAME_READY_RETURN;
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)playerCount;//방에 인원
+	sendBuffer += 2;
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		u_short ready = pNPlayer->GetReady();
+		*(u_short*)sendBuffer = ready;
+		sendBuffer += 2;
+	}
+	*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+	send(m_socket, m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+}
+
+void Connection::GameProcReq(char* _packetBuffer)
+{
+	char* sendBuffer = m_sendBuffer;
+	short win = *(short*)_packetBuffer;
+	_packetBuffer += 2;
+
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+	short playerCount = pRoom->GetPlayerCount();
+
+	if (pRoom->IsWin(win))
+	{
+		pRoom->GameOver();
+		sendBuffer += 2;
+		*(u_short*)sendBuffer = (u_short)PacketType::GAME_OVER;
+		sendBuffer += 2;
+		for (int i = 0; i < playerCount; i++)
+		{
+			CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+			int index = pNPlayer->GetIndex();
+			Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+			u_short win = pNPlayer->GetWin();
+			*(u_short*)sendBuffer = win;
+			sendBuffer += 2;
+			*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+			send(connection->GetSocket(), m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+			sendBuffer -= 2;
+		}
+		pRoom->GameInit();
+		return;
+	}
+	//pRoom->SelectedButton(dataSize);
+	//if(pRoom)
+
+	pRoom->SetTurn();
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)PacketType::GAME_PROC_RETURN;
+	sendBuffer += 2;
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		int index = pNPlayer->GetIndex();
+		Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+		*(u_short*)sendBuffer = win;
+		sendBuffer += 2;
+		u_short turn = pNPlayer->GetTurn();
+		*(u_short*)sendBuffer = turn;
+		sendBuffer += 2;
+		*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+		send(connection->GetSocket(), m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+		sendBuffer -= 4;
+	}
+}
+
+void Connection::GameRoomExit()
+{
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+	pRoom->ExitRoom(pPlayer);
+	pPlayer->GameInit();
+	CRoomManager::Getinstance()->EnterRoom(0, pPlayer);//로비 입장
+}
+
+void Connection::TimeOver(char* _packetBuffer)
+{
+	char* sendBuffer = m_sendBuffer;
+	short win = *(short*)_packetBuffer;
+	_packetBuffer += 2;
+	CPlayer* pPlayer = CPlayerManager::Getinstance()->FindPlayer(m_index);
+	CRoom* pRoom = CRoomManager::Getinstance()->GetRoom(pPlayer->GetRoomNum());
+	short playerCount = pRoom->GetPlayerCount();
+	pRoom->TimeOver();
+	sendBuffer += 2;
+	*(u_short*)sendBuffer = (u_short)PacketType::GAME_OVER;
+	sendBuffer += 2;
+	for (int i = 0; i < playerCount; i++)
+	{
+		CPlayer* pNPlayer = pRoom->GetRoomPlayer(i);
+		int index = pNPlayer->GetIndex();
+		Connection* connection = ConnectionManager::Getinstance()->FindConnection(index);
+		u_short win = pNPlayer->GetWin();
+		*(u_short*)sendBuffer = win;
+		sendBuffer += 2;
+		*(u_short*)m_sendBuffer = sendBuffer - m_sendBuffer;
+		send(connection->GetSocket(), m_sendBuffer, *(u_short*)m_sendBuffer, 0);
+		sendBuffer -= 2;
+	}
+	pRoom->GameInit();
+	return;
+}
+
+
+
+
